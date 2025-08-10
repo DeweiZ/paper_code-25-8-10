@@ -1,0 +1,60 @@
+
+rm(list = ls())
+options(stringsAsFactors = F)
+library(Seurat)
+library(SeuratObject)
+library(patchwork)
+library(tidyverse)
+library(ggplot2)
+library(clustree)
+library(infercnv)
+
+Epi_data <- readRDS("stepout/Epi_data.rds")
+Epi_data <- NormalizeData(Epi_data)
+Epi_data  <- FindVariableFeatures(Epi_data , selection.method = "vst", nfeatures = 2000)
+Epi_data <- ScaleData(Epi_data)
+Epi_data <- RunPCA(Epi_data)
+ElbowPlot(object = Epi_data)
+pc.num=1:15
+Epi_data <- FindNeighbors(Epi_data, dims = pc.num)
+if(T){sce <- Epi_data 
+sce <- FindClusters(object = sce,resolution = c(seq(.1,1,.1)))
+clustree(sce@meta.data, prefix = "RNA_snn_res.")}
+Epi_data <- FindClusters(Epi_data, resolution = 0.3)
+dims <- length(levels(Idents(Epi_data)))
+Epi_data <- RunUMAP(Epi_data, dims = 1:dims)
+UMAPPlot(Epi_data,label = T)
+
+new.cluster.ids <- c("B_Luminal",
+                     "B_Luminal",
+                     "Basal",
+                     "B_Luminal",
+                     "M_Luminal",
+                     "Club",
+                     "M_Luminal",
+                     "B_Luminal"
+                     )
+names(new.cluster.ids) <- levels(Epi_data)
+Epi_data <- RenameIdents(Epi_data, new.cluster.ids)
+Epi_data@active.ident <- factor(Epi_data@active.ident,levels =c("B_Luminal","M_Luminal","Basal","Club" ))
+DimPlot(Epi_data, 
+        reduction = "umap",
+        cols = c("#376795", "#E76254","#bda5ac","#72BCD5"),
+        seed = 9196,
+        pt.size = 0.5)
+DimPlot(Epi_data, 
+        reduction = "umap", 
+        cols = c("#376795","#E76254","#bda5ac","#72BCD5"), 
+        pt.size = 0.5,split.by = "tissue")
+save(Epi_data,file = "stepout/Epi_data_AN.Rdata")
+
+rm(list = ls())
+load(file ="stepout/PCa_data_AN.Rdata")
+load(file = "stepout/Epi_data_AN.Rdata")
+PCa_data_s <- subset(PCa_data, idents=c("Epithelial cells",'Myeloid cells', 'T cells',"Mast cells"))
+PCa_data_s <- JoinLayers(PCa_data_s)
+expr_matrix <- GetAssayData(PCa_data_s, assay = "RNA", layer = "counts")
+PCa_data_s2 <- subset(PCa_data_s, idents=c('Myeloid cells', 'T cells',"Mast cells"))
+annotation1 <- data.frame(Annotation = Idents(PCa_data_s2))
+annotation2 <- data.frame(Annotation = Idents(Epi_data))
+annotation <- rbind(annotation1,annotation2)
