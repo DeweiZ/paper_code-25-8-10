@@ -1,0 +1,132 @@
+
+rm(list = ls())
+library(ggplot2)
+library(pheatmap)
+library(ggplotify)
+library(cowplot)
+library(readxl)
+library(survminer)
+library(survival)
+library(glmnet)
+library(forestplot)
+
+rm(list = ls())
+load(file = "stepout/TCGA_data.rdata")
+deg_PP <- read.csv(file = "stepout/deg_PP.csv", row.names = 1)
+
+gene_set <- deg_PP$Gene
+exp_set <- exp_tumor[gene_set,]
+train_exp <- exp_set
+train_cl <- meta_dfs[,c(1:16)]
+
+cox <- apply(
+  train_exp,1,function(x){
+    train_cl$gene <- as.numeric(x)
+    cox_genes <- coxph(Surv(BCR_times, BCR_event) ~ gene, data = train_cl)
+    coef <- coef(cox_genes)
+    SE <- sqrt(diag(vcov(cox_genes)))
+    HR <- exp(coef)
+    cox_need <- cbind(HR = HR,
+                      HR.95L = exp(coef - qnorm(.975, 0, 1) * SE),
+                      HR.95H = exp(coef + qnorm(.975, 0, 1) * SE),
+                      pvalue = 1 - pchisq((coef/SE)^2, 1))
+    return(cox_need['gene',])
+  }
+)
+unicox <- t(cox)
+head(unicox)
+write.csv(unicox,file = "stepout/deg_unicox.csv")
+
+diff_unicox <- unicox[unicox[,4]<0.05,]
+dim(diff_unicox)
+table(diff_unicox[,1]<1)
+head(diff_unicox)
+
+gene_names <- rownames(unicox)
+HR <- unicox[,1]
+HR_low <- unicox[,2]
+HR_high <- unicox[,3]
+pvalue <- unicox[,4]
+forest_data <- data.frame(
+  gene = gene_names,
+  HR = sprintf("%.2f", HR),
+  CI = paste0(sprintf("%.2f", HR_low), "-", sprintf("%.2f", HR_high)),
+  pvalue = sprintf("%.3f", pvalue)
+)
+forestplot(
+  labeltext = as.matrix(forest_data[,c(1,2,3,4)]),
+  mean = HR,
+  lower = HR_low,
+  upper = HR_high,
+  zero = 1,
+  boxsize = 0.2,
+  lineheight = unit(8, "mm"),
+  col = fpColors(box = "#e76254", line = "#376795", summary = "#376795"),
+  xlab = "Hazard Ratio",
+  title = "Univariate Cox Regression Analysis"
+)
+
+exp <- train_exp
+cl <- train_cl
+exp <- exp[rownames(diff_unicox),]
+x <- t(exp)
+y <- data.matrix(Surv(time = cl$BCR_times,event = cl$BCR_event))
+fit <- glmnet(x, y, family = 'cox', type.measure = "deviance", nfolds = 10)
+pdf(file = "stepout/S4A.pdf",width=3.8, height=3.8)
+plot(fit,xvar = 'lambda',label = T)
+dev.off()
+
+set.seed(9196)
+lasso_fit <- cv.glmnet(x, y, family = 'cox', type.measure = 'deviance', nfolds = 10)
+pdf(file = "stepout/S4B.pdf",width=3.8, height=3.8)
+plot(lasso_fit)
+dev.off()
+
+best_lambda <- lasso_fit$lambda.min
+best_lambda
+model_lasso <- glmnet(x, y, family = 'cox', type.measure = 'deviance', nfolds = 10,lambda = best_lambda)
+coef(model_lasso)
+gene_min <- rownames(model_lasso$beta)[as.numeric(model_lasso$beta)!=0]
+gene_min
+
+save(gene_min,train_cl,train_exp,file = "stepout/TCGA_lasso.rdata")
+
+rm(list = ls())
+load(file = "stepout/TCGA_lasso.rdata")
+
+exp <- data.frame(RSG2 = train_exp["RGS2",])
+dt <- cbind(train_cl,exp)
+res.cut <- surv_cutpoint(dt, time = "BCR_times", event = "BCR_event",
+                         variables = "RSG2", minprop = 0.1,progressbar = TRUE)
+optimal_cutoff <- res.cut$cutpoint$cutpoint
+dt$risk <- ifelse(dt$RSG2 > optimal_cutoff, "High", "Low")
+saveRDS(dt,"stepout/TCGA_dt.rds")
+fit <- survfit(Surv(BCR_times, BCR_event) ~ risk, data = dt)
+fit
+pdf(file = "stepout/F4E.pdf",width=4, height=6)
+ggsurvplot(
+  fit,
+  data = dt,
+  censor = T,
+  censor.shape = "|", censor.size = 4,
+  conf.int = TRUE,
+  conf.int.style = "ribbon",
+  conf.int.alpha = 0.3,
+  pval = TRUE,
+  pval.size = 5,
+  legend = "top",
+  legend.title = 'expression',
+  legend.labs = c("High expression","Low expression"),
+  xlab = "Years",
+  ylab = "Survival probablity",
+  title = "Discovery TCGA Cohort",
+  palette = c('#e76254','#376795'),
+  ggtheme = theme_bw(),
+  risk.table = TRUE,
+  risk.table.col = "strata",
+  risk.table.title = 'Number at risk',
+  fontsize = 4,
+  risk.table.y.text = FALSE,
+  risk.table.height = 0.2
+)
+dev.off()
