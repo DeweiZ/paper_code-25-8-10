@@ -1,0 +1,259 @@
+
+rm(list = ls()) 
+library(GSVA)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+
+load(file = "stepout/TCGA_data.rdata")
+gene_set <- read.csv(file = "stepout/CAF.csv",row.names = 1)[,1]
+
+gene_set_filtered <- intersect(gene_set, rownames(exp_tumor))
+cat("原始基因集包含", length(gene_set), "个基因\n")
+cat("在表达矩阵中找到", length(gene_set_filtered), "个基因\n")
+if(length(gene_set_filtered) < 5) {
+  warning("基因集中可用基因数量较少，可能影响分析结果")
+}
+gene_set_list <- list(MyGeneSet = gene_set_filtered)
+gsvaP <- ssgseaParam(
+  exprData = as.matrix(exp_tumor),
+  geneSets = gene_set_list,
+  minSize = 1,
+  maxSize = Inf,
+  alpha = 0.25,
+  normalize = TRUE
+)
+gsea_scores <- gsva(gsvaP)
+score_df <- as.data.frame(t(gsea_scores))
+colnames(score_df) <- "MyGeneSet_Score"
+score_df$tID <- rownames(score_df)
+cat("完成ssGSEA分析\n")
+
+merged_data <- merge(meta_dfs, score_df, by = "tID")
+write.csv(merged_data, "stepout/merged_data_single_geneset.csv", row.names = FALSE)
+
+cat("开始最佳截断值分析...\n")
+tryCatch({
+  res.cut <- surv_cutpoint(
+    data = merged_data,
+    time = "BCR_times",
+    event = "BCR_event",
+    variables = "MyGeneSet_Score",
+    minprop = 0.1,
+    progressbar = TRUE
+  )
+  cutpoint <- res.cut$cutpoint$cutpoint
+  cat("最佳截断值:", round(cutpoint, 4), "\n")
+  res.cat <- surv_categorize(res.cut)
+  n_low <- sum(res.cat$MyGeneSet_Score == "low")
+  n_high <- sum(res.cat$MyGeneSet_Score == "high")
+  cat("低表达组样本数:", n_low, "\n")
+  cat("高表达组样本数:", n_high, "\n")
+  res.cat$MyGeneSet_Score <- factor(res.cat$MyGeneSet_Score,
+                                   levels = c("low", "high"),
+                                   labels = c(paste0("Low (n=", n_low, ")"),
+                                            paste0("High (n=", n_high, ")")))
+  fit <- survfit(Surv(BCR_times, BCR_event) ~ MyGeneSet_Score, data = res.cat)
+  km_plot <- ggsurvplot(
+    fit,
+    data = res.cat,
+    pval = TRUE,
+    pval.method = TRUE,
+    risk.table = TRUE,
+    risk.table.col = "strata",
+    palette = c("#e76254", "#376795"),
+    title = paste0("Gene Set Survival Analysis\nCutpoint: ", round(cutpoint, 3)),
+    xlab = "Time (days)",
+    ylab = "Biochemical Recurrence-Free Survival",
+    risk.table.height = 0.3,
+    ggtheme = theme_minimal()
+  )
+  print(km_plot)
+  cox_model <- coxph(Surv(BCR_times, BCR_event) ~ MyGeneSet_Score, data = res.cat)
+  cox_summary <- summary(cox_model)
+  cox_results <- data.frame(
+    Variable = "MyGeneSet_Score",
+    HR = cox_summary$conf.int[1, "exp(coef)"],
+    lower_95 = cox_summary$conf.int[1, "lower .95"],
+    upper_95 = cox_summary$conf.int[1, "upper .95"],
+    p_value = cox_summary$coefficients[1, "Pr(>|z|)"],
+    cutpoint = cutpoint,
+    n_low = n_low,
+    n_high = n_high,
+    stringsAsFactors = FALSE
+  )
+  cox_results$risk_type <- case_when(
+    cox_results$HR > 1 & cox_results$p_value < 0.05 ~ "Risk factor",
+    cox_results$HR < 1 & cox_results$p_value < 0.05 ~ "Protective factor",
+    TRUE ~ "Not significant"
+  )
+  cat("\n=== 基因集Cox回归分析结果 ===\n")
+  print(cox_results)
+
+  cat("\n开始对基因集中每个基因进行单独分析...\n")
+  expr_data_t <- t(exp_tumor[gene_set_filtered, ])
+  expr_clinical <- merge(meta_dfs, expr_data_t, by.x = "tID", by.y = "row.names")
+  individual_cox_results <- data.frame(
+    gene = character(),
+    HR = numeric(),
+    lower_95 = numeric(),
+    upper_95 = numeric(),
+    p_value = numeric(),
+    stringsAsFactors = FALSE
+  )
+  for(gene in gene_set_filtered) {
+    tryCatch({
+      formula_str <- paste("Surv(BCR_times, BCR_event) ~", paste0("`", gene, "`"))
+      cox_gene <- coxph(as.formula(formula_str), data = expr_clinical)
+      cox_gene_summary <- summary(cox_gene)
+      individual_cox_results <- rbind(individual_cox_results, data.frame(
+        gene = gene,
+        HR = cox_gene_summary$conf.int[1, "exp(coef)"],
+        lower_95 = cox_gene_summary$conf.int[1, "lower .95"],
+        upper_95 = cox_gene_summary$conf.int[1, "upper .95"],
+        p_value = cox_gene_summary$coefficients[1, "Pr(>|z|)"],
+        stringsAsFactors = FALSE
+      ))
+    }, error = function(e) {
+      cat("分析基因", gene, "时出错:", e$message, "\n")
+    })
+  }
+  individual_cox_results <- individual_cox_results %>%
+    mutate(
+      p_adj = p.adjust(p_value, method = "fdr"),
+      risk_type = case_when(
+        HR > 1 & p_value < 0.05 ~ "Risk factor",
+        HR < 1 & p_value < 0.05 ~ "Protective factor",
+        TRUE ~ "Not significant"
+      ),
+      significance = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01 ~ "**", 
+        p_value < 0.05 ~ "*",
+        TRUE ~ ""
+      )
+    ) %>%
+    arrange(p_value)
+  cat("完成", nrow(individual_cox_results), "个基因的Cox分析\n")
+  print(head(individual_cox_results, 10))
+
+  cat("\n创建包含所有", nrow(individual_cox_results), "个基因的森林图...\n")
+  n_genes <- nrow(individual_cox_results)
+  font_size <- case_when(
+    n_genes <= 20 ~ 10,
+    n_genes <= 50 ~ 8,
+    n_genes <= 100 ~ 6,
+    TRUE ~ 4
+  )
+  plot_height <- max(8, n_genes * 0.3)
+  forest_plot_genes <- ggplot(individual_cox_results, 
+                             aes(x = HR, y = reorder(gene, -p_value))) +
+    geom_point(aes(color = risk_type, size = -log10(p_value)), alpha = 0.8) +
+    geom_errorbarh(aes(xmin = lower_95, xmax = upper_95, color = risk_type), 
+                   height = 0.3, alpha = 0.8) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "black", alpha = 0.6) +
+    geom_text(aes(x = upper_95 + max(upper_95) * 0.05, label = significance), 
+              hjust = 0, size = max(2, font_size - 2), color = "black") +
+    scale_color_manual(values = c(
+      "Risk factor" = "#e76254",
+      "Protective factor" = "#f8ac8c",
+      "Not significant" = "#376795"
+    )) +
+    scale_size_continuous(range = c(1, 4), name = "-log10(p-value)") +
+    scale_x_log10(labels = scales::number_format(accuracy = 0.01)) +
+    labs(
+      title = "Individual Gene Cox Regression Forest Plot",
+      subtitle = paste0("Showing all ", n_genes, " genes from gene set"),
+      x = "Hazard Ratio (95% CI)",
+      y = "Gene",
+      color = "Effect type"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 12),
+      axis.text.y = element_text(size = font_size),
+      axis.text.x = element_text(size = 10),
+      axis.title = element_text(size = 12),
+      legend.position = "bottom",
+      legend.text = element_text(size = 10),
+      legend.title = element_text(size = 10),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line(color = "grey90", size = 0.5)
+    )
+  print(forest_plot_genes)
+
+  significant_genes <- individual_cox_results %>%
+    filter(p_value < 0.05) %>%
+    arrange(p_value)
+  cat("\n=== 显著性基因汇总 ===\n")
+  cat("共有", nrow(significant_genes), "个基因具有显著性预后价值 (p < 0.05)\n")
+  if(nrow(significant_genes) > 0) {
+    cat("风险因子基因数:", sum(significant_genes$HR > 1), "\n")
+    cat("保护因子基因数:", sum(significant_genes$HR < 1), "\n")
+    print(significant_genes[, c("gene", "HR", "lower_95", "upper_95", "p_value", "risk_type")])
+  }
+
+  cat("\n=== 分组描述性统计 ===\n")
+  group_stats <- res.cat %>%
+    group_by(MyGeneSet_Score) %>%
+    summarise(
+      n = n(),
+      events = sum(BCR_event),
+      event_rate = round(sum(BCR_event)/n() * 100, 2),
+      median_time = median(BCR_times),
+      .groups = 'drop'
+    )
+  print(group_stats)
+
+  write.csv(cox_results, "stepout/cox_results_geneset.csv", row.names = FALSE)
+  write.csv(individual_cox_results, "stepout/cox_results_individual_genes.csv", row.names = FALSE)
+  write.csv(significant_genes, "stepout/significant_genes.csv", row.names = FALSE)
+  write.csv(res.cat, "stepout/categorized_data_single_geneset.csv", row.names = FALSE)
+
+  ggsave("stepout/survival_curve_geneset.pdf", 
+         plot = km_plot$plot, width = 10, height = 8)
+  ggsave("stepout/forest_plot_all_genes.pdf", 
+         plot = forest_plot_genes, 
+         width = 14, 
+         height = plot_height,
+         limitsize = FALSE)
+  if(n_genes > 50) {
+    ggsave("stepout/forest_plot_all_genes.png", 
+           plot = forest_plot_genes, 
+           width = 14, 
+           height = plot_height,
+           dpi = 300,
+           limitsize = FALSE)
+  }
+  cat("\n分析完成！结果已保存到stepout文件夹\n")
+  cat("基因集Cox结果保存为: cox_results_geneset.csv\n")
+  cat("个体基因Cox结果保存为: cox_results_individual_genes.csv\n")
+  cat("显著性基因保存为: significant_genes.csv\n")
+  cat("森林图保存为: forest_plot_all_genes.pdf\n")
+  if(n_genes > 50) {
+    cat("高分辨率森林图保存为: forest_plot_all_genes.png\n")
+  }
+  
+}, error = function(e) {
+  cat("分析过程中出错:", e$message, "\n")
+  cat("尝试使用中位数作为截断值...\n")
+  median_cutpoint <- median(merged_data$MyGeneSet_Score, na.rm = TRUE)
+  merged_data$Group <- ifelse(merged_data$MyGeneSet_Score > median_cutpoint, 
+                             "High", "Low")
+  fit_simple <- survfit(Surv(BCR_times, BCR_event) ~ Group, data = merged_data)
+  km_plot_simple <- ggsurvplot(
+    fit_simple,
+    data = merged_data,
+    pval = TRUE,
+    risk.table = TRUE,
+    title = paste0("Gene Set Survival Analysis (Median Cutpoint: ", 
+                   round(median_cutpoint, 3), ")"),
+    xlab = "Time (days)",
+    ylab = "Survival probability"
+  )
+  print(km_plot_simple)
+  cox_simple <- coxph(Surv(BCR_times, BCR_event) ~ Group, data = merged_data)
+  print(summary(cox_simple))
+})
