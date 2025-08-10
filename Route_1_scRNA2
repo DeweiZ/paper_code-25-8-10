@@ -1,0 +1,95 @@
+
+rm(list = ls())
+options(stringsAsFactors = F)
+library(Seurat)
+library(SeuratObject)
+library(patchwork)
+library(tidyverse)
+library(ggplot2)
+library(clustree)
+library(celldex)
+library(SingleR)
+
+load(file ="stepout/PCa_data6.RData")
+dim(PCa_data)
+PCa_data$orig.ident <- factor(PCa_data$orig.ident)
+path_to_files <- "input/GSE176031/"
+file_list <- list.files(path = path_to_files, pattern = "\\.txt$", full.names = TRUE)
+
+PCa_data$tissue <- factor(case_when(
+          PCa_data$orig.ident %in% "GSM5353230" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353231" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353232" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353233" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353234" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353235" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353236" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353237" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353238" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353239" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353240" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353241" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353242" ~ "Adjacent",
+          PCa_data$orig.ident %in% "GSM5353243" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353244" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353245" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353246" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353247" ~ "Tumor",
+          PCa_data$orig.ident %in% "GSM5353248" ~ "Tumor"
+          ))
+
+colnames(PCa_data@meta.data)
+PCa_data@meta.data <- PCa_data@meta.data[,-c(8:45)]
+
+DefaultAssay(PCa_data) <-"RNA"
+PCa_data <- NormalizeData(PCa_data)
+PCa_data  <- FindVariableFeatures(PCa_data , selection.method = "vst", nfeatures = 2000)
+PCa_data <- ScaleData(PCa_data)
+PCa_data <- RunPCA(PCa_data)
+ElbowPlot(object = PCa_data)
+pc.num=1:20
+PCa_data <- FindNeighbors(PCa_data, dims = pc.num)
+if(F){sce <- PCa_data 
+sce <- FindClusters(object = sce,resolution = c(seq(.1,1,.1)))
+clustree(sce@meta.data, prefix = "RNA_snn_res.")}
+PCa_data <- FindClusters(PCa_data, resolution = 0.7)
+dims <- length(levels(Idents(PCa_data)))
+PCa_data <- RunUMAP(PCa_data, dims = 1:dims)
+UMAPPlot(PCa_data,label = T)
+
+new.cluster.ids <- c("Epithelial cells",
+                     "Epithelial cells",
+                     "Epithelial cells",
+                     "Epithelial cells",
+                     "Epithelial cells",
+                     "Myeloid cells",
+                     "Epithelial cells",
+                     "Epithelial cells",
+                     "Epithelial cells",
+                     "Endothelial cells",
+                     "T cells",
+                     "Smooth muscle cells",
+                     "Epithelial cells",
+                     "Myeloid cells",
+                     "Fibroblasts",
+                     "Mast cells"
+                     )
+
+names(new.cluster.ids) <- levels(PCa_data)
+PCa_data <- RenameIdents(PCa_data, new.cluster.ids)
+
+DimPlot(PCa_data, 
+        reduction = "umap",
+        cols = c("#72BCD5", "#376795", "#bda5ac", "#E76254", "#649b92", "#9a4700","#F2C94C","#8A2BE2"),
+        seed = 9196,
+        pt.size = 0.5)
+
+DimPlot(PCa_data, 
+        reduction = "umap", 
+        cols = c("#72BCD5", "#376795", "#bda5ac", "#E76254", "#649b92", "#9a4700","#F2C94C","#8A2BE2"), 
+        pt.size = 0.5,split.by = "tissue")
+
+save(PCa_data,file = "stepout/PCa_data_AN.Rdata")
+
+Epi_data <- subset(PCa_data, idents='Epithelial cells')
+saveRDS(Epi_data,"stepout/Epi_data.rds")
