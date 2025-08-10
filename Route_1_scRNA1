@@ -1,0 +1,89 @@
+
+rm(list = ls())
+library(Seurat)
+library(decontX)
+library(DoubletFinder)
+library(ggplot2)
+library(tidyverse)
+library(clustree)
+library(glmGamPoi)
+library(purrr)
+options(Seurat.object.assay.version = 'v4')
+
+path_to_files <- "input/GSE176031/"
+file_list <- list.files(path = path_to_files, pattern = "\\.txt$", full.names = TRUE)
+
+PCa_data <- lapply(file_list, function(file) {
+  file_name <- basename(file)
+  gsm_name <- gsub(".*(GSM\\d{7}).*", "\\1", file_name)
+  expression_data <- read.delim(file, row.names = 1, header = TRUE, sep = "\t")
+  seurat_obj <- CreateSeuratObject(counts = expression_data, project = gsm_name)
+  return(seurat_obj)
+})
+
+for (i in seq_along(PCa_data)){
+  PCa_data[[i]] <- PercentageFeatureSet(PCa_data[[i]],
+                                               pattern = "^MT-",
+                                               col.name = "percent.mt")
+}
+
+names(PCa_data) <- basename(file_list)
+
+change_1 <- list()
+for (i in seq_along(PCa_data)){
+  change_1[[i]] <- data.frame(dim(PCa_data[[i]]))
+}
+change_1 <- as.data.frame(change_1,row.names = c("Gene","Cell"),fix.empty.names = F)
+colnames(change_1)  <- names(PCa_data)
+sum(change_1[2,])
+
+PCa_data <- lapply(X = PCa_data, FUN = function(x) {
+   x <- subset(x, subset = nFeature_RNA >= 300 &
+                        percent.mt < 20 &
+                        nCount_RNA >= 500)
+})
+
+change_2 <- list()
+for (i in seq_along(PCa_data)){
+  change_2[[i]] <- data.frame(dim(PCa_data[[i]]))
+}
+change_2 <- as.data.frame(change_2,row.names = c("Gene","Cell"),fix.empty.names = F)
+colnames(change_2)  <- names(PCa_data)
+sum(change_2[2,])
+
+PCa_data <- lapply(X = PCa_data, FUN = function(x){
+  counts <- x@assays[["RNA"]]@layers[["counts"]]
+  decontX_results <- decontX(counts)
+  x$Contamination<- decontX_results$contamination
+  x = x[,x$Contamination < 0.2]
+})
+
+change_3 <- list()
+for (i in seq_along(PCa_data)){
+  change_3[[i]] <- data.frame(dim(PCa_data[[i]]))
+}
+change_3 <- as.data.frame(change_3,row.names = c("Gene","Cell"),fix.empty.names = F)
+colnames(change_3)  <- names(PCa_data)
+sum(change_3[2,])
+
+saveRDS(PCa_data,file="stepout/PCa_data.rds")
+
+PCa_data <- readRDS(file="stepout/PCa_data3.rds")
+if (!requireNamespace("glmGamPoi", quietly = TRUE)) {
+PCa_data <- lapply(X = PCa_data, FUN = SCTransform, vars.to.regress = "percent.mt", verbose = FALSE)
+}else{
+PCa_data <- lapply(X = PCa_data, FUN = SCTransform, vars.to.regress = "percent.mt", verbose = FALSE, method = "glmGamPoi")
+}
+
+features <- SelectIntegrationFeatures(object.list = PCa_data,nfeatures = 2000)
+PCa_data <- PrepSCTIntegration(object.list = PCa_data, anchor.features = features)
+
+save(features,PCa_data, file ="stepout/PCa_data4.RData")
+
+PCa_data_anchors <- FindIntegrationAnchors(object.list = PCa_data,normalization.method = "SCT", anchor.features = features)
+save(PCa_data_anchors, file ="stepout/PCa_data5.RData")
+
+load(file="stepout/PCa_data5.RData")
+PCa_data <- IntegrateData(anchorset = PCa_data_anchors ,normalization.method = "SCT")
+
+save(PCa_data, file ="stepout/PCa_data6.RData")
