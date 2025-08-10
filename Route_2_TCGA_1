@@ -1,0 +1,81 @@
+
+rm(list = ls())
+library(tinyarray)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(readr)
+
+load("input/TCGA-PRAD_gdc.Rdata")
+exp_tumor <- log2(edgeR::cpm(exp[,Group=='tumor'])+1)
+exp_normal <- log2(edgeR::cpm(exp[,Group=='normal'])+1)
+deg_PP <- read.csv(file = "stepout/deg_PP.csv", row.names = 1)
+
+gene_deg <- as.data.frame(exp_tumor[rownames(exp_tumor) %in% deg_PP$Gene,],optional = T)
+gene_deg <- as.data.frame(t(gene_deg))
+gene_deg_normal<- as.data.frame(exp_normal[rownames(exp_tumor) %in% deg_PP$Gene,],optional = T)
+
+gene_deg$ID <- substr(rownames(gene_deg),1,12)
+gene_deg$tID <- rownames(gene_deg)
+gene_deg <- gene_deg[!duplicated(gene_deg$ID),]
+
+clinical2 <- read_tsv("input/clinical.tsv")
+colnames(clinical2)
+clinical2 <- clinical2[,c("case_submitter_id","ajcc_clinical_m","ajcc_clinical_t","ajcc_pathologic_n","ajcc_pathologic_t","primary_gleason_grade","secondary_gleason_grade")]
+clinical2<- clinical2[!duplicated(clinical2$case_submitter_id),]
+clinical2$G_grade <- as.integer(str_sub(clinical2$primary_gleason_grade,start = 9,end = 9))+as.integer(str_sub(clinical2$secondary_gleason_grade,start = 9,end = 9))
+clinical2 <- clinical2[,c(1,2,4,5,8)]
+clinical2[clinical2 =="'--"] <- NA
+
+colnames(clinical)
+meta = clinical[,c(
+  'bcr_patient_barcode',
+  'gender',
+  'vital_status',
+  "race_list",
+  "days_to_birth" ,                                  
+  "days_to_death",                                   
+  "days_to_last_followup",
+  "days_to_bone_scan_performed",
+  "bone_scan_results",
+  "new_tumor_events",
+  "days_to_first_biochemical_recurrence"
+)]
+
+meta <- merge(meta,gene_deg,by.x= "bcr_patient_barcode" ,by.y= "ID")
+meta <- merge(meta,clinical2,by.x= "bcr_patient_barcode" ,by.y= "case_submitter_id")
+row.names(meta)<- meta$tID
+
+colnames(meta)=c('ID','gender','event',"race",'age','death_time','followup_time',"PFS_times","PFS_event","BCR_event","BCR_times","CXCL2","COL12A1","RND3","RGS2", "IL6","STOM","GEM","LCLAT1","TRIB1","SOCS1","RNF39","tID","stage_M","stage_N","stage_T","G_grade")
+colnames(gene_deg)
+
+meta<- tidyr::unite(meta, "OS_time", death_time, followup_time,sep="",remove= T,na.rm = T)
+meta$follow_up_time <- meta$OS_time
+meta$OS_time <- as.integer(meta$OS_time)
+
+table(meta$event)
+meta$event[meta$event=="Alive"] <- "0"
+meta$event[meta$event=="Dead"] <- "1"
+meta$event<- as.integer(meta$event)
+table(meta$event)
+range(meta$OS_time)
+meta$OS_time = meta$OS_time/30
+range(meta$OS_time)
+
+write.csv(meta,file = "stepout/meta.csv")
+meta_dfs<- read.csv(file = "stepout/meta_set.csv")
+
+length(colnames(exp_tumor))
+p = identical(meta_dfs$tID,colnames(exp_tumor));p
+if(!p) exp_tumor = exp_tumor[,match(meta_dfs$tID,colnames(exp_tumor))]
+length(colnames(exp_tumor))
+
+meta_dfs$BCR_event[str_detect(meta_dfs$BCR_event,"NO")] <- "0"
+meta_dfs$BCR_event[str_detect(meta_dfs$BCR_event,"YES")] <- "1"
+meta_dfs$BCR_times <- as.integer(meta_dfs$BCR_times)
+table(meta_dfs$BCR_event)
+meta_dfs$BCR_event <- as.integer(meta_dfs$BCR_event)
+meta_dfs$BCR_times = meta_dfs$BCR_times/30
+meta_dfs$BCR_times <- round(meta_dfs$BCR_times/12,5)
+
+save(exp_normal,exp_tumor,meta_dfs,file = "stepout/TCGA_data.rdata")
