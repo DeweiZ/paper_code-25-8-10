@@ -1,0 +1,110 @@
+
+rm(list = ls())
+library(limma)
+library(clusterProfiler)
+library(enrichplot)
+library(stringr)
+library(ggthemes)
+library(ggplot2)
+library(FactoMineR)
+library(factoextra)
+library(ggpubr)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(dplyr)
+
+load(file = "stepout/TCGA_data.rdata")
+meta_group <- readRDS("stepout/TCGA_dt.rds")
+Group = ifelse(str_detect(meta_group$risk,"High"),"High","Low")
+Group = factor(Group,levels = c("High","Low"))
+
+marker <- "RGS2"
+tumor <- as.data.frame(exp_tumor[rownames(exp_tumor) %in% marker,],optional = T)
+normal<- as.data.frame(exp_normal[rownames(exp_normal) %in% marker,],optional = T)
+tumor$group <- "Tumor"
+normal$group <- "Normal"
+tdata <- rbind.data.frame(tumor,normal)
+colnames(tdata)[1] <- "RGS2"
+tdata$group <- as.factor(tdata$group)
+p1 = ggplot(tdata,aes(x = group, y = tdata[,"RGS2"],color= group))+
+  geom_boxplot(size=1,width=0.5) +
+  xlab("Group") +
+  ylab("RGS2_Expression") +
+  scale_color_manual(values=c('Normal'='#376795','Tumor'='#e76254'))+
+  theme_classic()+
+  stat_compare_means(comparisons = list( c("Normal", "Tumor")))
+p1
+ggsave(plot = p1,filename = "F4D.pdf",path="stepout/",width = 8,height = 10, units = "cm")
+
+design=model.matrix(~Group)
+fit=lmFit(exp_tumor,design)
+fit=eBayes(fit)
+deg=topTable(fit,coef=2,number = Inf)
+logFC_t= 1
+P.Value_t = 0.05
+k1 = (deg$P.Value < P.Value_t)&(deg$logFC < -logFC_t)
+k2 = (deg$P.Value < P.Value_t)&(deg$logFC > logFC_t)
+deg <- mutate(deg,change = ifelse(k1,"down",ifelse(k2,"up","stable")))
+table(deg$change)
+write.csv(deg,file ="stepout/deg_tcga.csv")
+
+ids <- bitr(row.names(deg),fromType="SYMBOL",toType="ENTREZID", OrgDb="org.Hs.eg.db",drop = TRUE)
+deg$symbol <- row.names(deg)
+deg <- merge(deg,ids,by.x = "symbol",by.y="SYMBOL")
+deg2 <- deg[!deg$change=="stable",]
+write.csv(deg2,file = "stepout/deg2.csv")
+kk <- enrichKEGG(gene=deg2$ENTREZID,
+                 organism='hsa',
+                 pvalueCutoff=0.05,
+                 pAdjustMethod="BH",
+                 qvalueCutoff=0.05)
+dat <- kk@result %>% filter(pvalue<0.05)
+
+dat=dat[order(dat$Count,decreasing = T),]
+dat <- dat[1:15,]
+gk_plot <- ggplot(dat,aes( x=reorder(Description, Count), y = Count,fill = pvalue)) +
+  geom_bar(stat = "identity",width=0.8) +
+  coord_flip() +
+  scale_fill_gradient(low = "#e76254",high ="#376795" )+
+  labs(x="", y="Count") +
+  theme_pander()  +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line.x = element_line(size = 0.3, colour = "black"),
+        axis.ticks.length.x = unit(-0.20, "cm"),
+        axis.text.x = element_text(margin = margin(t = 0.3, unit = "cm")),
+        axis.ticks.x = element_line(colour = "black",size = 0.3) ,
+        axis.ticks.y = element_blank(),
+        axis.text.y  = element_text(hjust=0),
+        panel.background = element_rect(fill=NULL, colour = 'white')
+  )
+gk_plot
+ggsave(plot = gk_plot ,filename = "F4F.pdf",path="stepout/",width = 20,height = 10, units = "cm")
+
+bulk_all <-enrichGO(deg2$ENTREZID,
+                    OrgDb = 'org.Hs.eg.db',
+                    keyType = "ENTREZID",
+                    ont = "ALL",
+                    pvalueCutoff = 0.05,
+                    qvalueCutoff = 0.05,
+                    readable = T)
+go <-  bulk_all@result %>% filter(pvalue<0.05)
+go_CC <- go[go$ONTOLOGY=="CC",][1:15,]
+go_plot <- ggplot(go_CC,aes(x=reorder(Description, Count), y = Count,fill = pvalue)) +
+  geom_bar(stat = "identity",width=0.8) +
+  coord_flip() +
+  scale_fill_gradient(low = "#e76254",high ="#376795" )+
+  labs(x="", y="Count") +
+  theme_pander()  +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line.x = element_line(size = 0.3, colour = "black"),
+        axis.ticks.length.x = unit(-0.20, "cm"),
+        axis.text.x = element_text(margin = margin(t = 0.3, unit = "cm")),
+        axis.ticks.x = element_line(colour = "black",size = 0.3) ,
+        axis.ticks.y = element_blank(),
+        axis.text.y  = element_text(hjust=0),
+        panel.background = element_rect(fill=NULL, colour = 'white')
+  )
+go_plot
+ggsave(plot = go_plot ,filename = "F4G.pdf",path="stepout/",width = 20,height = 10, units = "cm")
