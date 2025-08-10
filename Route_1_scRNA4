@@ -1,0 +1,229 @@
+
+rm(list = ls())
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(ggpubr)
+library(tidyverse)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(ggthemes)
+library(clustree)
+
+load(file = "stepout/Epi_data_AN.Rdata")
+Epi_data <- JoinLayers(Epi_data)
+markers <- FindMarkers(Epi_data,
+                      ident.1 = "B_Luminal",
+                      ident.2 = "M_Luminal",
+                      min.pct = 0.25,
+                      logfc.threshold = 0.5)
+
+sig_genes <- markers[markers$p_val_adj < 0.05 & abs(markers$avg_log2FC) > 0.5, ]
+gene_list <- abs(sig_genes$avg_log2FC)
+names(gene_list) <- rownames(sig_genes)
+gene_list <- sort(gene_list, decreasing = TRUE)
+de_genes <- rownames(sig_genes)
+entrez_ids <- bitr(de_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+go_bp <- enrichGO(gene = entrez_ids$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+
+go_mf <- enrichGO(gene = entrez_ids$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "MF",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+
+go_cc <- enrichGO(gene = entrez_ids$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "CC",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+
+go_cc <-  go_cc@result %>% filter(pvalue<0.05)
+go_cc <- go_cc[order(go_cc$Count,decreasing = T),]
+go_CC <- go_cc[1:15,]
+
+go_plot <- ggplot(go_CC,aes(x=reorder(Description, Count), y = Count,fill = pvalue)) +
+    geom_bar(stat = "identity",width=0.8) +
+    coord_flip() +
+    scale_fill_gradient(low = "#e76254",high ="#376795" )+
+    labs(x="", y="Count") +
+    theme_pander()  +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(size = 0.3, colour = "black"),
+          axis.ticks.length.x = unit(-0.20, "cm"),
+          axis.text.x = element_text(margin = margin(t = 0.3, unit = "cm")),
+          axis.ticks.x = element_line(colour = "black",size = 0.3) ,
+          axis.ticks.y = element_blank(),
+          axis.text.y  = element_text(hjust=0),
+          panel.background = element_rect(fill=NULL, colour = 'white')
+          )
+go_plot
+
+ggsave(plot = go_plot ,filename = "F2B.pdf",path="stepout/",width = 16,height = 10, units = "cm")
+
+load(file = "stepout/PCa_data_AN.Rdata")
+PCa_data <- JoinLayers(PCa_data)
+
+CAF <- c('VIM','ACTA2','TGFB1','AR','TGFBR1','TGFBR2','FAP','CD90','CD105','COL1A1','COL1A2','FSP1','PDPN','DPP4','PDGFRA','PDGFRB','TNC','ASPN','POSTN','EGF','FGF7','FGF2','FGF10','IGF1','HGF','VEGFA','OGN','FN1','FBLN1','CTSK','PARVA','ZEB1','SPARC')
+write.csv(CAF,file = "stepout/CAF.csv")
+
+Fib_data <- subset(PCa_data, idents=c("Fibroblasts"))
+Fib_data <- NormalizeData(Fib_data)
+Fib_data  <- FindVariableFeatures(Fib_data , selection.method = "vst", nfeatures = 2000)
+Fib_data <- ScaleData(Fib_data)
+Fib_data <- RunPCA(Fib_data)
+ElbowPlot(object = Fib_data)
+pc.num=1:20
+Fib_data <- FindNeighbors(Fib_data,
+                         dims = pc.num,
+                         k.param = 20,
+                         prune.SNN = 1/15)
+if(T){sce <- Fib_data
+sce <- FindClusters(object = sce,resolution = c(seq(.1,1,.1)))
+clustree(sce@meta.data, prefix = "RNA_snn_res.")}
+Fib_data <- FindClusters(Fib_data, resolution = 0.3)
+dims <- length(levels(Idents(Fib_data)))
+Fib_data <- RunUMAP(Fib_data,
+                   dims = pc.num,
+                   n.neighbors = 15,
+                   min.dist = 0.1,
+                   spread = 0.8,
+                   metric = "cosine",
+                   n.epochs = 500)
+p1 <- UMAPPlot(Fib_data, pt.size = 1.2, label.size = 6,split.by = "tissue")
+print(p1)
+
+Fib_data <- AddModuleScore(object = Fib_data, features = list(CAF), ctrl = 100, name = "CAFscore",assay = "RNA", search = T )
+p <- FeaturePlot(Fib_data,features="CAFscore1",cols = c("#eeeeee", "#e76254"),pt.size = 1,split.by = "tissue")&
+     theme(legend.position = "right")
+p[[1]] <- p[[1]] + NoLegend()
+ggsave(plot = p,filename = "S4.pdf",path="stepout/",width = 20,height = 10, units = "cm")
+
+Fib_data[["caf_group"]] <- ifelse(Fib_data@meta.data[,"CAFscore1"] > mean(Fib_data@meta.data[,"CAFscore1"]),"CAF_High_FIB","CAF_Low_FIB")
+Idents(Fib_data) <- Fib_data$caf_group
+CAF_score <- FetchData(Fib_data,vars = c('caf_group', 'CAFscore1',"tissue"))
+CAF_score$caf_group <- as.factor(CAF_score$caf_group)
+p = ggplot(CAF_score,aes(x = caf_group, y = CAF_score[,"CAFscore1"],color= caf_group))+
+  geom_boxplot(size=1,width=0.5) +
+  xlab("Group") +
+  ylab("CAFscore") +
+  scale_color_manual(values=c('CAF_Low_FIB'='#376795','CAF_High_FIB'='#e76254'))+
+  theme_classic()+
+  stat_compare_means(comparisons = list( c("CAF_Low_FIB", "CAF_High_FIB")))
+p
+ggsave(plot = p,filename = "F2C.pdf",path="stepout/",width = 10,height = 10, units = "cm")
+save(Fib_data,file = "stepout/Fib_data.Rdata")
+
+Fib_markers <- FindMarkers(Fib_data,
+                      ident.1 = "CAF_High_FIB",
+                      ident.2 = "CAF_Low_FIB",
+                      min.pct = 0.25,
+                      logfc.threshold = 0.5)
+
+sig_genes <- Fib_markers[Fib_markers$p_val < 0.05 & abs(Fib_markers$avg_log2FC) > 0.5, ]
+gene_list <- abs(sig_genes$avg_log2FC)
+names(gene_list) <- rownames(sig_genes)
+gene_list <- sort(gene_list, decreasing = TRUE)
+de_genes <- rownames(sig_genes)
+entrez_ids <- bitr(de_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+kk <- enrichKEGG(gene=entrez_ids$ENTREZID,
+                    organism='hsa',
+                    pvalueCutoff=0.05,
+                    pAdjustMethod="BH",
+                    qvalueCutoff=0.05)
+dat <- kk@result %>% filter(pvalue<0.05)
+
+dat <- dat[order(dat$Count,decreasing = T),]
+dat2 <- dat[1:15,]
+gk_plot <- ggplot(dat2,aes( x=reorder(Description, Count), y = Count,fill = pvalue)) +
+    geom_bar(stat = "identity",width=0.8) +
+    coord_flip() +
+    scale_fill_gradient(low = "#e76254",high ="#376795" )+
+    labs(x="", y="Count") +
+    theme_pander()  +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(size = 0.3, colour = "black"),
+          axis.ticks.length.x = unit(-0.20, "cm"),
+          axis.text.x = element_text(margin = margin(t = 0.3, unit = "cm")),
+          axis.ticks.x = element_line(colour = "black",size = 0.3) ,
+          axis.ticks.y = element_blank(),
+          axis.text.y  = element_text(hjust=0),
+          panel.background = element_rect(fill=NULL, colour = 'white')
+          )
+gk_plot
+ggsave(plot = gk_plot ,filename = "F2C1.pdf",path="stepout/",width = 12.5,height = 10, units = "cm")
+
+go_bp <- enrichGO(gene = entrez_ids$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+go_mf <- enrichGO(gene = entrez_ids$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "MF",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+go_cc <- enrichGO(gene = entrez_ids$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "CC",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+go_cc <-  go_cc@result %>% filter(pvalue<0.05)
+go_cc <- go_cc[order(go_cc$Count,decreasing = T),]
+go_CC <- go_cc[1:15,]
+go_plot <- ggplot(go_CC,aes(x=reorder(Description, Count), y = Count,fill = pvalue)) +
+    geom_bar(stat = "identity",width=0.8) +
+    coord_flip() +
+    scale_fill_gradient(low = "#e76254",high ="#376795" )+
+    labs(x="", y="Count") +
+    theme_pander()  +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(size = 0.3, colour = "black"),
+          axis.ticks.length.x = unit(-0.20, "cm"),
+          axis.text.x = element_text(margin = margin(t = 0.3, unit = "cm")),
+          axis.ticks.x = element_line(colour = "black",size = 0.3) ,
+          axis.ticks.y = element_blank(),
+          axis.text.y  = element_text(hjust=0),
+          panel.background = element_rect(fill=NULL, colour = 'white')
+          )
+go_plot
+ggsave(plot = go_plot ,filename = "F2C2.pdf",path="stepout/",width = 16,height = 10, units = "cm")
+
+rm(list = ls())
+purrr::walk(list.files('cpplot/',pattern="*.R$",full.names = T),source,.GlobalEnv)
+mypvals <- read.table("input1/out/pvalues.txt",header = T,sep = "\t",stringsAsFactors = F)
+mymeans <- read.table("input1/out/means.txt",header = T,sep = "\t",stringsAsFactors = F)
+p <- ccc_number_heatmap2(pfile = "input1/out/pvalues.txt",color.palette = c("#376795","#f8ac8c","#e76254"))
+ccc_bubble(pfile="input1/out/pvalues.txt",mfile="input1/out/means.txt",
+            neg_log10_th= -log10(0.05),
+    means_exp_log2_th=0.3,
+    notused.cell=NULL,
+    used.cell=NULL,
+    neg_log10_th2= 5,
+    cell.pair=c(
+        "CAF_High_FIB|M_Luminal",
+        "CAF_High_FIB|B_Luminal",
+        "CAF_High_FIB|Basal",
+        "CAF_High_FIB|Club",
+        "CAF_Low_FIB|M_Luminal",
+        "CAF_Low_FIB|B_Luminal",
+        "CAF_Low_FIB|Basal",
+        "CAF_Low_FIB|Club"
+        ),
+    means_exp_log2_th2=c(0,1))
