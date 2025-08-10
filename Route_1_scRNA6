@@ -1,0 +1,67 @@
+
+rm(list = ls())
+library(Seurat)
+library(msigdbr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tidyverse)
+library(ggpubr)
+
+load(file = "stepout/Epi_data_AN.Rdata")
+Epi_data <- JoinLayers(Epi_data)
+DefaultAssay(Epi_data) <- "SCT"
+
+M_Luminal_data <- subset(Epi_data, idents = "M_Luminal")
+calcium_genes <- msigdbr(species = "Homo sapiens",
+                         category = "C5",
+                         subcategory = "GO:CC") %>%
+  filter(grepl("CALCIUM", gs_name)) %>%
+  dplyr::select(gene_symbol, gs_name)
+calcium_gene_sets <- split(calcium_genes$gene_symbol, calcium_genes$gs_name)
+rgs2_expr <- GetAssayData(M_Luminal_data, assay = "RNA")["RGS2",]
+gocc_stats <- data.frame()
+for(set_name in names(calcium_gene_sets)) {
+  genes <- calcium_gene_sets[[set_name]]
+  genes_in_data <- intersect(genes, rownames(GetAssayData(M_Luminal_data, assay = "RNA")))
+  if(length(genes_in_data) >= 3) {
+    set_avg_expr <- colMeans(GetAssayData(M_Luminal_data, assay = "RNA")[genes_in_data,])
+    cor_test <- cor.test(rgs2_expr, set_avg_expr, method = "spearman")
+    display_name <- gsub("GOCC_", "", set_name)
+    gocc_stats <- rbind(gocc_stats,
+                        data.frame(gene_set = display_name,
+                                   original_name = set_name,
+                                   correlation = cor_test$estimate,
+                                   p_value = cor_test$p.value,
+                                   avg_expr = mean(set_avg_expr),
+                                   gene_count = length(genes_in_data)))
+  }
+}
+gocc_stats$p_adj <- p.adjust(gocc_stats$p_value, method = "BH")
+gocc_stats$log10_p <- -log10(gocc_stats$p_adj)
+gocc_stats$significant <- gocc_stats$p_adj < 0.05
+if(nrow(gocc_stats) > 15) {
+  gocc_stats <- gocc_stats %>%
+    arrange(desc(abs(correlation))) %>%
+    head(15)
+}
+p <- ggplot(gocc_stats, aes(x = correlation, y = reorder(gene_set, correlation))) +
+  geom_point(aes(size = log10_p, color = correlation)) +
+  scale_color_gradient2(low = "#376795", mid = "#f8ac8c", high = "#e76254",
+                        midpoint = median(gocc_stats$correlation),
+                        name = "Correlation") +
+  scale_size_continuous(range = c(3, 10), name = "-log10(p-adj)") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold"),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 11)
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  labs(
+    title = "rgs2与GO:CC钙离子基因集平均表达的相关性",
+    subtitle = paste0("分析了", nrow(gocc_stats), "个GO:CC钙离子相关基因集"),
+    x = "Spearman相关系数"
+  )
+ggsave(plot = p,filename = "F2E.pdf",path="stepout/",width =30,height = 15, units = "cm")
