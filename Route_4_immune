@@ -1,0 +1,64 @@
+
+rm(list = ls())
+library(immunedeconv)
+library(CIBERSORT)
+library(ggsci)
+library(tidyr)
+library(ggpubr)
+library(tidyverse)
+
+load("input/TCGA-PRAD_gdc.Rdata")
+exp_tumor<- exp[,Group=='tumor']
+meta_group <- readRDS("stepout/TCGA_dt.rds")
+group = ifelse(str_detect(meta_group$risk,"High"),"High","Low")
+group = factor(group,levels = c("High","Low"))
+exp_tumor = t(t(exp_tumor)/colSums(exp_tumor)) * 10^6
+p = identical(meta_group$tID,colnames(exp_tumor));p
+if(!p) exp_tumor = exp_tumor[,match(meta_group$tID,colnames(exp_tumor))]
+
+sig_matrix <- system.file("extdata", "LM22.txt", package = "CIBERSORT")
+exp <- exp_tumor
+
+load("stepout/res_cibersort.Rdata")
+res_cibersort <- res[,1:22]
+ciber.res <- res_cibersort[,colSums(res_cibersort) > 0]
+
+identical(rownames(ciber.res),meta_group$tID)
+ciber.res<- as.data.frame(ciber.res)
+ciber.res$group <- meta_group$risk
+ciber.res$sample <- rownames(ciber.res)
+b <- gather(ciber.res,key=CIBERSORT,value = Proportion,-c(group,sample))
+p <- ggboxplot(b, x = "CIBERSORT", y = "Proportion",fill = "group", palette = "lancet")+
+  scale_fill_manual(values=c('Low'='#376795','High'='#e76254'))+
+  stat_compare_means(aes(group = group),
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                                      symbols = c("***", "**", "*", "ns")))+
+  theme(text = element_text(size=10),
+        axis.text.x = element_text(angle=45, hjust=1))
+ggsave(plot = p ,filename = "S4D.pdf",path="stepout/",width = 25,height = 12, units = "cm")
+
+library(Hmisc)
+load("stepout/TCGA_data.rdata")
+exp<- exp_tumor
+re <- t(ciber.res[,1:20])
+identical(colnames(re),colnames(exp))
+gs <- c("RGS2","RNF39")
+nc = t(rbind(re,exp[gs,]))
+m = rcorr(nc)$r[1:nrow(re),(ncol(nc)-length(gs)+1):ncol(nc)]
+p = rcorr(nc)$P[1:nrow(re),(ncol(nc)-length(gs)+1):ncol(nc)]
+library(dplyr)
+tmp = matrix(ifelse(p<0.01,"**",
+                    ifelse(p<0.05,"*","")),nrow = nrow(p))
+library(pheatmap)
+library(ggplotify)
+p <-  as.ggplot(as.grob(pheatmap(m,
+                                 display_numbers = tmp,
+                                 angle_col =45,
+                                 color = colorRampPalette(c("#376795", "#eeeeee", "#e76254"))(100),
+                                 border_color = "#eeeeee",
+                                 treeheight_col = 0,
+                                 treeheight_row = 0,
+                                 ylab = "left" )))
+ggsave(plot = p ,filename = "S4C.pdf",path="stepout/",width = 12.5,height = 12, units = "cm")
