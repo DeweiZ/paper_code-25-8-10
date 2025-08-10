@@ -1,0 +1,60 @@
+
+rm(list = ls())
+library(msigdbr)
+library(dplyr)
+library(ggplot2)
+
+load(file = "stepout/TCGA_data.rdata")
+
+calcium_genes <- msigdbr(species = "Homo sapiens",
+                         category = "C5",
+                         subcategory = "GO:CC") %>%
+  filter(grepl("CALCIUM", gs_name)) %>%
+  dplyr::select(gene_symbol, gs_name)
+calcium_gene_sets <- split(calcium_genes$gene_symbol, calcium_genes$gs_name)
+
+rgs2_expr <- exp_tumor["RGS2",]
+
+gocc_stats <- data.frame()
+for(set_name in names(calcium_gene_sets)) {
+  genes <- calcium_gene_sets[[set_name]]
+  genes_in_data <- intersect(genes, rownames(exp_tumor))
+  if(length(genes_in_data) >= 3) {
+    set_avg_expr <- colMeans(exp_tumor[genes_in_data,])
+    cor_test <- cor.test(rgs2_expr, set_avg_expr, method = "spearman")
+    display_name <- gsub("GOCC_", "", set_name)
+    gocc_stats <- rbind(gocc_stats,
+                        data.frame(gene_set = display_name,
+                                   correlation = cor_test$estimate,
+                                   p_value = cor_test$p.value,
+                                   gene_count = length(genes_in_data)))
+  }
+}
+gocc_stats$p_adj <- p.adjust(gocc_stats$p_value, method = "BH")
+gocc_stats$log10_p <- -log10(gocc_stats$p_adj)
+if(nrow(gocc_stats) > 15) {
+  gocc_stats <- gocc_stats %>%
+    arrange(desc(abs(correlation))) %>%
+    head(15)
+}
+
+p <- ggplot(gocc_stats, aes(x = correlation, y = reorder(gene_set, correlation))) +
+  geom_point(aes(size = log10_p, color = correlation)) +
+  scale_color_gradient2(low = "#376795", mid = "#f8ac8c", high = "#e76254",
+                        midpoint = median(gocc_stats$correlation),
+                        name = "Correlation") +
+  scale_size_continuous(range = c(3, 10), name = "-log10(p-adj)") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(face = "bold"),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(size = 11)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  labs(title = "RGS2与GO:CC钙离子基因集平均表达的相关性 (TCGA)",
+       subtitle = paste0("分析了", nrow(gocc_stats), "个GO:CC钙离子相关基因集"),
+       x = "Spearman相关系数")
+
+ggsave("stepout/TCGA_RGS2_calcium_correlation.pdf", plot = p,
+       width = 30, height = 15, units = "cm")
+
+print(gocc_stats)
